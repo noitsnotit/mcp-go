@@ -12,6 +12,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/go-redis/redis/v8"
 	"github.com/google/uuid"
 	"github.com/noitsnotit/mcp-go/mcp"
 )
@@ -86,6 +87,7 @@ type SSEServer struct {
 	eventQueueBuilder            EventQueueBuilder
 	notificationChannelBuilder   NotificationChannelBuilder
 
+	redisClient       *redis.Client
 	keepAlive         bool
 	keepAliveInterval time.Duration
 
@@ -285,11 +287,11 @@ func (s *SSEServer) handleSSE(w http.ResponseWriter, r *http.Request) {
 	s.sessions.Store(sessionID, session)
 	defer s.sessions.Delete(sessionID)
 
-	if err := s.server.RegisterSession(r.Context(), session); err != nil {
-		http.Error(w, fmt.Sprintf("Session registration failed: %v", err), http.StatusInternalServerError)
-		return
-	}
-	defer s.server.UnregisterSession(r.Context(), sessionID)
+	//if err := s.server.RegisterSession(r.Context(), session); err != nil {
+	//	http.Error(w, fmt.Sprintf("Session registration failed: %v", err), http.StatusInternalServerError)
+	//	return
+	//}
+	//defer s.server.UnregisterSession(r.Context(), sessionID)
 
 	// Start notification handler for this session
 	go func() {
@@ -383,15 +385,25 @@ func (s *SSEServer) handleMessage(w http.ResponseWriter, r *http.Request) {
 		s.writeJSONRPCError(w, nil, mcp.INVALID_PARAMS, "Missing sessionId")
 		return
 	}
-	sessionI, ok := s.sessions.Load(sessionID)
-	if !ok {
-		s.writeJSONRPCError(w, nil, mcp.INVALID_PARAMS, "Invalid session ID")
-		return
-	}
-	session := sessionI.(*sseSession)
 
-	// Set the client context before handling the message
-	ctx := s.server.WithContext(r.Context(), session)
+	sessionI, existsInLocal := s.sessions.Load(sessionID)
+	var session *sseSession
+	var ctx context.Context
+	if !existsInLocal {
+		ctx = context.Background()
+	} else {
+		session = sessionI.(*sseSession)
+
+		// Set the client context before handling the message
+		ctx = s.server.WithContext(r.Context(), session)
+	}
+
+	//sessionI, ok := s.sessions.Load(sessionID)
+	//if !ok {
+	//	s.writeJSONRPCError(w, nil, mcp.INVALID_PARAMS, "Invalid session ID")
+	//	return
+	//}
+
 	if s.contextFunc != nil {
 		ctx = s.contextFunc(ctx, r)
 	}
@@ -409,21 +421,29 @@ func (s *SSEServer) handleMessage(w http.ResponseWriter, r *http.Request) {
 	// Only send response if there is one (not for notifications)
 	if response != nil {
 		eventData, _ := json.Marshal(response)
+		eventMessage := fmt.Sprintf("event: message\ndata: %s\n\n", eventData)
 
-		// Queue the event for sending via SSE
-		select {
-		case session.eventQueue <- fmt.Sprintf("event: message\ndata: %s\n\n", eventData):
-			// Event queued successfully
-		case <-session.done:
-			// Session is closed, don't try to queue
-		default:
-			// Queue is full, could log this
+		if existsInLocal {
+			// Queue the event for sending via SSE
+			select {
+			case session.eventQueue <- eventMessage:
+				// Event queued successfully
+			case <-session.done:
+				// Session is closed, don't try to queue
+			default:
+				// Queue is full, could log this
+			}
+
+			// Send HTTP response
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusAccepted)
+			json.NewEncoder(w).Encode(response)
+		} else {
+			if err := s.redisClient.Publish(ctx, fmt.Sprintf("sse:event:%s", sessionID), eventMessage).Err(); err != nil {
+				s.writeJSONRPCError(w, nil, mcp.INVALID_PARAMS, "Invalid session ID")
+			}
 		}
 
-		// Send HTTP response
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusAccepted)
-		json.NewEncoder(w).Encode(response)
 	} else {
 		// For notifications, just send 202 Accepted with no body
 		w.WriteHeader(http.StatusAccepted)
