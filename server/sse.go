@@ -13,8 +13,28 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/mark3labs/mcp-go/mcp"
+	"github.com/noitsnotit/mcp-go/mcp"
 )
+
+// EventQueueBuilder creates event queues for SSE sessions
+type EventQueueBuilder func(sessionID string) chan string
+
+// NotificationChannelBuilder creates notification channels for SSE sessions
+type NotificationChannelBuilder func(sessionID string) chan mcp.JSONRPCNotification
+
+// WithEventQueueBuilder allows customizing the event queue implementation
+func WithEventQueueBuilder(builder EventQueueBuilder) SSEOption {
+	return func(s *SSEServer) {
+		s.eventQueueBuilder = builder
+	}
+}
+
+// WithNotificationChannelBuilder allows customizing the notification channel implementation
+func WithNotificationChannelBuilder(builder NotificationChannelBuilder) SSEOption {
+	return func(s *SSEServer) {
+		s.notificationChannelBuilder = builder
+	}
+}
 
 // sseSession represents an active SSE connection.
 type sseSession struct {
@@ -63,6 +83,8 @@ type SSEServer struct {
 	sessions                     sync.Map
 	srv                          *http.Server
 	contextFunc                  SSEContextFunc
+	eventQueueBuilder            EventQueueBuilder
+	notificationChannelBuilder   NotificationChannelBuilder
 
 	keepAlive         bool
 	keepAliveInterval time.Duration
@@ -150,7 +172,7 @@ func WithKeepAlive(keepAlive bool) SSEOption {
 	}
 }
 
-// WithContextFunc sets a function that will be called to customise the context
+// WithSSEContextFunc sets a function that will be called to customise the context
 // to the server using the incoming request.
 func WithSSEContextFunc(fn SSEContextFunc) SSEOption {
 	return func(s *SSEServer) {
@@ -240,13 +262,24 @@ func (s *SSEServer) handleSSE(w http.ResponseWriter, r *http.Request) {
 	}
 
 	sessionID := uuid.New().String()
+
+	eventQueue := make(chan string, 100)
+	if s.eventQueueBuilder != nil {
+		eventQueue = s.eventQueueBuilder(sessionID)
+	}
+
+	notificationChannel := make(chan mcp.JSONRPCNotification, 100)
+	if s.notificationChannelBuilder != nil {
+		notificationChannel = s.notificationChannelBuilder(sessionID)
+	}
+
 	session := &sseSession{
 		writer:              w,
 		flusher:             flusher,
 		done:                make(chan struct{}),
-		eventQueue:          make(chan string, 100), // Buffer for events
+		eventQueue:          eventQueue,
 		sessionID:           sessionID,
-		notificationChannel: make(chan mcp.JSONRPCNotification, 100),
+		notificationChannel: notificationChannel,
 	}
 
 	s.sessions.Store(sessionID, session)

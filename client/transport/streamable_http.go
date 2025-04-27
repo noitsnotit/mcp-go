@@ -15,7 +15,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/mark3labs/mcp-go/mcp"
+	"github.com/noitsnotit/mcp-go/mcp"
 )
 
 type StreamableHTTPCOption func(*StreamableHTTP)
