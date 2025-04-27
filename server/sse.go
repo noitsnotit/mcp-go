@@ -97,6 +97,13 @@ type SSEServer struct {
 // SSEOption defines a function type for configuring SSEServer
 type SSEOption func(*SSEServer)
 
+// WithRedisClient sets the Redis client for the SSE server
+func WithRedisClient(redisClient *redis.Client) SSEOption {
+	return func(s *SSEServer) {
+		s.redisClient = redisClient
+	}
+}
+
 // WithBaseURL sets the base URL for the SSE server
 func WithBaseURL(baseURL string) SSEOption {
 	return func(s *SSEServer) {
